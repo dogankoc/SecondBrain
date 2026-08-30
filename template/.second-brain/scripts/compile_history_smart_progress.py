@@ -6,7 +6,6 @@ import io
 import json
 import os
 import re
-import shutil
 import signal
 import time
 
@@ -38,7 +37,6 @@ def _provider_timeout(provider: str) -> int:
         "groq": _env_timeout("SECOND_BRAIN_GROQ_TIMEOUT", 45),
         "gemini": _env_timeout("SECOND_BRAIN_GEMINI_TIMEOUT", 60),
         "openrouter": _env_timeout("SECOND_BRAIN_OPENROUTER_TIMEOUT", 25),
-        "codex": _env_timeout("SECOND_BRAIN_CODEX_TIMEOUT", 90),
         "ollama": _env_timeout("SECOND_BRAIN_OLLAMA_TIMEOUT", 300),
     }.get(provider, 60)
 
@@ -48,7 +46,6 @@ def _provider_label(provider: str) -> str:
         "groq": "Groq",
         "gemini": "Gemini",
         "openrouter": "OpenRouter",
-        "codex": "ChatGPT/Codex",
         "ollama": "Ollama",
     }.get(provider, provider.capitalize())
 
@@ -79,8 +76,6 @@ def _short_reason(err: str | None) -> str:
         return "auth/access"
     if "missing-key" in text:
         return "key missing"
-    if "codex-missing" in text or "codex_missing" in text:
-        return "CLI missing"
     if "bad-response" in text or "empty" in text:
         return "invalid response"
     return "request failed"
@@ -135,8 +130,6 @@ def _provider_order() -> list[str]:
     for provider in ("groq", "gemini", "openrouter"):
         if provider in configured:
             order.append(provider)
-    if shutil.which("codex"):
-        order.append("codex")
     order.append("ollama")
     return order
 
@@ -296,14 +289,13 @@ base.save_state = save_state_with_human_progress
 
 def provider_summary() -> None:
     clouds = set(smart._configured_clouds())
-    codex_ready = shutil.which("codex") is not None
     print("SECOND BRAIN · HISTORY COMPILER", flush=True)
     print(f"  Ana: {'Groq' if 'groq' in clouds else 'yok'}", flush=True)
     print(f"  Yedek 1: {'Gemini' if 'gemini' in clouds else 'yok'}", flush=True)
     print(f"  Yedek 2: {'OpenRouter' if 'openrouter' in clouds else 'yok'}", flush=True)
-    print(f"  Yedek 3: {'ChatGPT/Codex CLI hazır' if codex_ready else 'ChatGPT/Codex CLI bulunamadı'}", flush=True)
     print("  Son fallback: Ollama", flush=True)
-    print("  Hard timeout: Groq 45s · Gemini 60s · OpenRouter 25s · ChatGPT/Codex 90s · Ollama 300s", flush=True)
+    print("  Codex CLI: devre dışı", flush=True)
+    print("  Hard timeout: Groq 45s · Gemini 60s · OpenRouter 25s · Ollama 300s", flush=True)
     print("  Mod: Groq-first + katmanlı fallback + JSON doğrulama + süre/ETA + provider audit", flush=True)
     print("", flush=True)
 
