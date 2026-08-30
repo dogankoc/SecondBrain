@@ -1,0 +1,11 @@
+.claude/settings.local.json
+.second-brain/hooks/.state/
+.second-brain/scripts/.state/*
+!.second-brain/scripts/.state/.gitkeep
+__pycache__/
+.DS_Store
+.obsidian/workspace*
+.obsidian/cache
+.env
+*.bak
+*.yedek

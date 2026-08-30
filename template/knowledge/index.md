@@ -1,0 +1,2 @@
+# Bilgi Tabanı İndeksi
+
