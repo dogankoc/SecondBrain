@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import time
 
@@ -36,8 +37,19 @@ def _provider_timeout(provider: str) -> int:
         "groq": _env_timeout("SECOND_BRAIN_GROQ_TIMEOUT", 45),
         "gemini": _env_timeout("SECOND_BRAIN_GEMINI_TIMEOUT", 60),
         "openrouter": _env_timeout("SECOND_BRAIN_OPENROUTER_TIMEOUT", 25),
+        "codex": _env_timeout("SECOND_BRAIN_CODEX_TIMEOUT", 90),
         "ollama": _env_timeout("SECOND_BRAIN_OLLAMA_TIMEOUT", 300),
     }.get(provider, 60)
+
+
+def _provider_label(provider: str) -> str:
+    return {
+        "groq": "Groq",
+        "gemini": "Gemini",
+        "openrouter": "OpenRouter",
+        "codex": "ChatGPT/Codex",
+        "ollama": "Ollama",
+    }.get(provider, provider.capitalize())
 
 
 def _valid_json_object(text: str | None) -> bool:
@@ -66,6 +78,8 @@ def _short_reason(err: str | None) -> str:
         return "auth/access"
     if "missing-key" in text:
         return "key missing"
+    if "codex-missing" in text or "codex_missing" in text:
+        return "CLI missing"
     if "bad-response" in text or "empty" in text:
         return "invalid response"
     return "request failed"
@@ -115,13 +129,7 @@ def _quiet_call(provider: str, prompt: str, tier: str):
 
 
 def _cloud_order() -> list[str]:
-    """Primary rotation is Groq ↔ Gemini; OpenRouter is reserve-only fallback.
-
-    Each new chunk starts with the next primary provider. If it fails or is in
-    cooldown, the other primary is tried. OpenRouter is attempted only when both
-    primary providers fail for that chunk, preserving its limited free daily quota.
-    Ollama is appended later as the final local fallback.
-    """
+    """Primary rotation is Groq ↔ Gemini; OpenRouter is reserve-only cloud fallback."""
     global _primary_rr_index
 
     configured = smart._configured_clouds()
@@ -187,7 +195,11 @@ def human_run_model(
     if provider and provider != "auto":
         order = [provider]
     else:
+        # Cloud first. If all cloud options fail, use Codex CLI authenticated
+        # with the user's ChatGPT account. Ollama remains the last local fallback.
         order = _cloud_order()
+        if shutil.which("codex") and "codex" not in order:
+            order.append("codex")
         if "ollama" not in order:
             order.append("ollama")
 
@@ -213,7 +225,7 @@ def human_run_model(
                 eta_text = f" · session ETA ~{_fmt_duration(avg * remaining_chunks)}"
 
             print(
-                f"{label}  ✓ {candidate.capitalize()} · {_fmt_duration(elapsed)}{eta_text}{suffix}",
+                f"{label}  ✓ {_provider_label(candidate)} · {_fmt_duration(elapsed)}{eta_text}{suffix}",
                 flush=True,
             )
 
@@ -232,7 +244,7 @@ def human_run_model(
 
             return out, None
 
-        failures.append(f"{candidate.capitalize()}: {reason}")
+        failures.append(f"{_provider_label(candidate)}: {reason}")
 
     elapsed = time.monotonic() - chunk_started_at
     print(
@@ -298,18 +310,20 @@ base.save_state = save_state_with_human_progress
 def provider_summary() -> None:
     clouds = smart._configured_clouds()
     primaries = [p for p in ("groq", "gemini") if p in clouds]
-    primary_text = " ↔ ".join(x.capitalize() for x in primaries) if primaries else "yok"
+    primary_text = " ↔ ".join(_provider_label(x) for x in primaries) if primaries else "yok"
     reserve_text = "OpenRouter" if "openrouter" in clouds else "yok"
+    codex_ready = shutil.which("codex") is not None
 
     print("SECOND BRAIN · HISTORY COMPILER", flush=True)
     print(f"  Ana cloud: {primary_text}", flush=True)
     print(f"  Cloud yedek: {reserve_text}", flush=True)
+    print(f"  ChatGPT yedek: {'Codex CLI hazır' if codex_ready else 'Codex CLI bulunamadı'}", flush=True)
     print("  Son fallback: Ollama", flush=True)
     print(
-        "  Hard timeout: Groq 45s · Gemini 60s · OpenRouter 25s · Ollama 300s",
+        "  Hard timeout: Groq 45s · Gemini 60s · OpenRouter 25s · ChatGPT/Codex 90s · Ollama 300s",
         flush=True,
     )
-    print("  Mod: primary round-robin + reserve fallback + JSON doğrulama + süre/ETA", flush=True)
+    print("  Mod: primary round-robin + reserve fallbacks + JSON doğrulama + süre/ETA", flush=True)
     print("", flush=True)
 
 
