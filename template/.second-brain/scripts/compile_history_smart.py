@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -27,7 +29,7 @@ _last_compiled_count = len(_initial_compiled) if isinstance(_initial_compiled, d
 _total_sessions = len(base.discover_sessions())
 
 
-def _cloud_chunk_size(default: int = 14000) -> int:
+def _cloud_chunk_size(default: int = 12000) -> int:
     """Keep free-tier cloud requests safely below low per-minute token limits."""
     try:
         value = int(os.environ.get("SECOND_BRAIN_CLOUD_CHUNK_CHARS", str(default)))
@@ -36,8 +38,38 @@ def _cloud_chunk_size(default: int = 14000) -> int:
     return max(6000, min(value, base.CHUNK_CHARS))
 
 
+def _groq_retry_policy() -> tuple[int, float]:
+    try:
+        retries = int(os.environ.get("SECOND_BRAIN_GROQ_RATE_RETRIES", "6"))
+    except ValueError:
+        retries = 6
+    try:
+        max_wait = float(os.environ.get("SECOND_BRAIN_GROQ_MAX_RETRY_WAIT", "30"))
+    except ValueError:
+        max_wait = 30.0
+    return max(0, retries), max(1.0, max_wait)
+
+
+def _retry_after_seconds(header_map: dict[str, str], body: str) -> float | None:
+    value = header_map.get("Retry-After", "").strip()
+    if value:
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            pass
+
+    # Groq rate-limit bodies commonly contain: "Please try again in 6.9825s."
+    match = re.search(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", body, flags=re.I)
+    if match:
+        try:
+            return max(0.0, float(match.group(1)))
+        except ValueError:
+            pass
+    return None
+
+
 def _curl_groq(prompt: str, tier: str, timeout: int, json_mode: bool):
-    """Call Groq with curl so Cloudflare sees the same client family as manual tests.
+    """Call Groq with curl and honor short TPM retry windows before fallback.
 
     The API key is written only to a mode-0600 temporary curl config and never
     appears in process arguments or logs.
@@ -61,6 +93,8 @@ def _curl_groq(prompt: str, tier: str, timeout: int, json_mode: bool):
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
+    max_retries, max_retry_wait = _groq_retry_policy()
+
     try:
         with tempfile.TemporaryDirectory(prefix="second-brain-groq-") as td:
             td_path = Path(td)
@@ -77,8 +111,8 @@ def _curl_groq(prompt: str, tier: str, timeout: int, json_mode: bool):
             config_path.write_text(
                 "\n".join(
                     [
-                        'silent',
-                        'show-error',
+                        "silent",
+                        "show-error",
                         'request = "POST"',
                         'url = "https://api.groq.com/openai/v1/chat/completions"',
                         f'header = "Authorization: Bearer {key}"',
@@ -95,51 +129,67 @@ def _curl_groq(prompt: str, tier: str, timeout: int, json_mode: bool):
             )
             os.chmod(config_path, 0o600)
 
-            cp = subprocess.run(
-                ["curl", "--config", str(config_path)],
-                text=True,
-                capture_output=True,
-                timeout=timeout,
-            )
+            for attempt in range(max_retries + 1):
+                response_path.write_text("", encoding="utf-8")
+                headers_path.write_text("", encoding="utf-8")
 
-            if cp.returncode != 0:
-                return None, f"curl-exit-{cp.returncode}:{(cp.stderr or '')[-500:]}", None, {}, model
+                cp = subprocess.run(
+                    ["curl", "--config", str(config_path)],
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout,
+                )
 
-            try:
-                status = int((cp.stdout or "").strip()[-3:])
-            except Exception:
-                status = None
+                if cp.returncode != 0:
+                    return None, f"curl-exit-{cp.returncode}:{(cp.stderr or '')[-500:]}", None, {}, model
 
-            header_map: dict[str, str] = {}
-            if headers_path.exists():
-                for line in headers_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                    if ":" not in line:
+                try:
+                    status = int((cp.stdout or "").strip()[-3:])
+                except Exception:
+                    status = None
+
+                header_map: dict[str, str] = {}
+                if headers_path.exists():
+                    for line in headers_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                        if ":" not in line:
+                            continue
+                        name, value = line.split(":", 1)
+                        name = name.strip()
+                        value = value.strip()
+                        if name.lower() == "retry-after":
+                            header_map["Retry-After"] = value
+                        else:
+                            header_map[name] = value
+
+                body = (
+                    response_path.read_text(encoding="utf-8", errors="replace")
+                    if response_path.exists()
+                    else ""
+                )
+
+                if status == 429 and attempt < max_retries:
+                    retry_after = _retry_after_seconds(header_map, body)
+                    if retry_after is not None and retry_after <= max_retry_wait:
+                        wait = max(1, math.ceil(retry_after) + 1)
+                        print(
+                            f"  LLM WAIT provider=groq reason=rate-limit "
+                            f"retry={attempt + 1}/{max_retries} waiting={wait}s",
+                            flush=True,
+                        )
+                        time.sleep(wait)
                         continue
-                    name, value = line.split(":", 1)
-                    name = name.strip()
-                    value = value.strip()
-                    if name.lower() == "retry-after":
-                        header_map["Retry-After"] = value
-                    else:
-                        header_map[name] = value
 
-            body = (
-                response_path.read_text(encoding="utf-8", errors="replace")
-                if response_path.exists()
-                else ""
-            )
+                if status is None or status < 200 or status >= 300:
+                    compact = " ".join(body.split())[-1000:]
+                    return None, f"http-{status}:{compact}", status, header_map, model
 
-            if status is None or status < 200 or status >= 300:
-                compact = " ".join(body.split())[-1000:]
-                return None, f"http-{status}:{compact}", status, header_map, model
+                try:
+                    data = json.loads(body)
+                    out = str(data["choices"][0]["message"]["content"]).strip()
+                except Exception as exc:
+                    return None, f"bad-response:{exc}", status, header_map, model
 
-            try:
-                data = json.loads(body)
-                out = str(data["choices"][0]["message"]["content"]).strip()
-            except Exception as exc:
-                return None, f"bad-response:{exc}", status, header_map, model
-
-            return out, (None if out else "empty"), status, header_map, model
+                return out, (None if out else "empty"), status, header_map, model
 
     except subprocess.TimeoutExpired:
         return None, "timeout", None, {}, model
@@ -239,11 +289,14 @@ def provider_summary() -> None:
         configured.append("openrouter")
     configured.append("ollama")
 
+    retries, max_wait = _groq_retry_policy()
+
     print("HYBRID LLM ROUTER", flush=True)
     print(f"  priority={priority}", flush=True)
     print(f"  available/configured={','.join(configured)}", flush=True)
     print(f"  cloud_chunk_chars={_cloud_chunk_size()}", flush=True)
     print("  groq_transport=curl", flush=True)
+    print(f"  groq_rate_retries={retries} max_wait={max_wait:g}s", flush=True)
 
     cooldowns = []
     for provider in ("groq", "gemini", "openrouter", "ollama"):
