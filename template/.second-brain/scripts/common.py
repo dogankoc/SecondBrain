@@ -62,6 +62,14 @@ def _retry_seconds(headers,default=600):
     try:return max(1,int(headers.get('Retry-After','') or default))
     except Exception:return default
 
+def _safe_error(err):
+    text=str(err or 'empty').replace('\n',' ').replace('\r',' ')
+    for name in ('GROQ_API_KEY','GEMINI_API_KEY','OPENROUTER_API_KEY'):
+        secret=os.environ.get(name,'')
+        if secret:text=text.replace(secret,'[REDACTED]')
+    text=re.sub(r'(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,}\]]+',r'\1[REDACTED]',text)
+    return text[:700]
+
 def _http_json(url,payload,headers=None,timeout=300):
     data=json.dumps(payload,ensure_ascii=False).encode('utf-8')
     req=urllib.request.Request(url,data=data,headers={'Content-Type':'application/json',**(headers or {})},method='POST')
@@ -87,7 +95,7 @@ def _openai_compatible(provider,url,key,model,prompt,timeout,json_mode=True,extr
 
 def _run_groq(prompt,tier,timeout,json_mode):
     key=os.environ.get('GROQ_API_KEY','').strip()
-    if not key:return None,'missing-key',None,{}
+    if not key:return None,'missing-key',None,{},''
     model=os.environ.get('SECOND_BRAIN_GROQ_FAST','qwen/qwen3.6-27b') if tier=='fast' else os.environ.get('SECOND_BRAIN_GROQ_SMART','qwen/qwen3.8-27b')
     out,err,status,hdrs=_openai_compatible('groq','https://api.groq.com/openai/v1/chat/completions',key,model,prompt,timeout,json_mode)
     return out,err,status,hdrs,model
@@ -135,6 +143,7 @@ def run_model(prompt,tier='fast',timeout=300,provider='auto',json_mode=False):
     for p in _provider_order(provider):
         remaining=_cooldown_remaining(p)
         if remaining>0:
+            print(f'  LLM SKIP provider={p} reason=cooldown remaining={remaining}s',flush=True)
             errors.append(f'{p}:cooldown-{remaining}s'); continue
         model=''
         if p=='groq': out,err,status,hdrs,model=_run_groq(prompt,tier,timeout,json_mode)
@@ -162,11 +171,15 @@ def run_model(prompt,tier='fast',timeout=300,provider='auto',json_mode=False):
         if not err and out:
             print(f'  LLM provider={p} model={model or "default"}',flush=True)
             return out,None
+        safe=_safe_error(err)
         if status in (429,500,502,503,504):
             default=int(os.environ.get('SECOND_BRAIN_PROVIDER_COOLDOWN','600'))
             seconds=_retry_seconds(hdrs,default); _set_cooldown(p,seconds)
-            errors.append(f'{p}:{err};cooldown={seconds}s')
-        else: errors.append(f'{p}:{err or "empty"}')
+            print(f'  LLM FAIL provider={p} model={model or "default"} http={status or "n/a"} reason={safe} cooldown={seconds}s -> fallback',flush=True)
+            errors.append(f'{p}:{safe};cooldown={seconds}s')
+        else:
+            print(f'  LLM FAIL provider={p} model={model or "default"} http={status or "n/a"} reason={safe} -> fallback',flush=True)
+            errors.append(f'{p}:{safe}')
     return None,';'.join(errors) or 'no-provider'
 
 run_claude=run_model
