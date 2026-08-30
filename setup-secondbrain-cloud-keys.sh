@@ -42,5 +42,5 @@ store_key "Pijkard SecondBrain Gemini" "Gemini"
 store_key "Pijkard SecondBrain OpenRouter" "OpenRouter"
 
 echo
-echo=""
-echo "Done. Run ./compile-history-smart-keychain.sh \"$HOME/Documents/Second Brain by Dogan\""
+echo "Done. Run:"
+echo "  ./compile-history-smart-keychain.sh \"$HOME/Documents/Second Brain by Dogan\""
