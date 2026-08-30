@@ -23,14 +23,25 @@ _last_compiled_count = len(_initial_compiled) if isinstance(_initial_compiled, d
 _total_sessions = len(base.discover_sessions())
 
 
+def _cloud_chunk_size(default: int = 14000) -> int:
+    """Keep free-tier cloud requests safely below low per-minute token limits."""
+    try:
+        value = int(os.environ.get("SECOND_BRAIN_CLOUD_CHUNK_CHARS", str(default)))
+    except ValueError:
+        value = default
+    return max(6000, min(value, base.CHUNK_CHARS))
+
+
 def filtered_chunks(text: str, size: int = base.CHUNK_CHARS):
     filtered, stats = prefilter_transcript(text)
     before = _original_chunks(text, size)
-    after = _original_chunks(filtered, size)
+    target_size = _cloud_chunk_size()
+    after = _original_chunks(filtered, target_size)
     print(
         f"  PREFILTER chars={stats.original_chars}->{stats.filtered_chars} "
         f"reduction={stats.reduction_percent:.1f}% "
-        f"chunks={len(before)}->{len(after)}",
+        f"chunks={len(before)}->{len(after)} "
+        f"target_chars={target_size}",
         flush=True,
     )
     return after
@@ -109,6 +120,20 @@ def provider_summary() -> None:
     print("HYBRID LLM ROUTER", flush=True)
     print(f"  priority={priority}", flush=True)
     print(f"  available/configured={','.join(configured)}", flush=True)
+    print(f"  cloud_chunk_chars={_cloud_chunk_size()}", flush=True)
+
+    cooldowns = []
+    for provider in ("groq", "gemini", "openrouter", "ollama"):
+        try:
+            remaining = common._cooldown_remaining(provider)
+        except Exception:
+            remaining = 0
+        if remaining > 0:
+            cooldowns.append(f"{provider}:{remaining}s")
+    print(
+        f"  provider_cooldowns={','.join(cooldowns) if cooldowns else 'none'}",
+        flush=True,
+    )
     print(
         "  cloud keys are read from environment only; key values are never logged",
         flush=True,
