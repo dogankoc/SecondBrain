@@ -14,8 +14,7 @@ import common
 import compile_history as base
 from history_prefilter import prefilter_transcript
 
-# History compilation should use free cloud providers first and local Ollama last.
-# Paid/interactive CLI providers remain available only when explicitly requested.
+# Free cloud providers first; Ollama is the final local fallback.
 os.environ.setdefault(
     "SECOND_BRAIN_LLM_PRIORITY",
     "groq,gemini,openrouter,ollama",
@@ -30,24 +29,11 @@ _total_sessions = len(base.discover_sessions())
 
 
 def _cloud_chunk_size(default: int = 12000) -> int:
-    """Keep free-tier cloud requests safely below low per-minute token limits."""
     try:
         value = int(os.environ.get("SECOND_BRAIN_CLOUD_CHUNK_CHARS", str(default)))
     except ValueError:
         value = default
     return max(6000, min(value, base.CHUNK_CHARS))
-
-
-def _groq_retry_policy() -> tuple[int, float]:
-    try:
-        retries = int(os.environ.get("SECOND_BRAIN_GROQ_RATE_RETRIES", "6"))
-    except ValueError:
-        retries = 6
-    try:
-        max_wait = float(os.environ.get("SECOND_BRAIN_GROQ_MAX_RETRY_WAIT", "30"))
-    except ValueError:
-        max_wait = 30.0
-    return max(0, retries), max(1.0, max_wait)
 
 
 def _retry_after_seconds(header_map: dict[str, str], body: str) -> float | None:
@@ -58,7 +44,6 @@ def _retry_after_seconds(header_map: dict[str, str], body: str) -> float | None:
         except ValueError:
             pass
 
-    # Groq rate-limit bodies commonly contain: "Please try again in 6.9825s."
     match = re.search(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", body, flags=re.I)
     if match:
         try:
@@ -69,10 +54,11 @@ def _retry_after_seconds(header_map: dict[str, str], body: str) -> float | None:
 
 
 def _curl_groq(prompt: str, tier: str, timeout: int, json_mode: bool):
-    """Call Groq with curl and honor short TPM retry windows before fallback.
+    """Call Groq with curl; on 429 return immediately so router can rotate provider.
 
-    The API key is written only to a mode-0600 temporary curl config and never
-    appears in process arguments or logs.
+    Retry-After is synthesized from the Groq response body when necessary, allowing
+    common.run_model() to put only Groq on a short cooldown while Gemini/OpenRouter
+    process the current chunk. The API key never appears in logs or process args.
     """
     key = os.environ.get("GROQ_API_KEY", "").strip()
     if not key:
@@ -93,8 +79,6 @@ def _curl_groq(prompt: str, tier: str, timeout: int, json_mode: bool):
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
-    max_retries, max_retry_wait = _groq_retry_policy()
-
     try:
         with tempfile.TemporaryDirectory(prefix="second-brain-groq-") as td:
             td_path = Path(td)
@@ -103,11 +87,7 @@ def _curl_groq(prompt: str, tier: str, timeout: int, json_mode: bool):
             headers_path = td_path / "headers.txt"
             config_path = td_path / "curl.conf"
 
-            request_path.write_text(
-                json.dumps(payload, ensure_ascii=False),
-                encoding="utf-8",
-            )
-
+            request_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             config_path.write_text(
                 "\n".join(
                     [
@@ -129,67 +109,51 @@ def _curl_groq(prompt: str, tier: str, timeout: int, json_mode: bool):
             )
             os.chmod(config_path, 0o600)
 
-            for attempt in range(max_retries + 1):
-                response_path.write_text("", encoding="utf-8")
-                headers_path.write_text("", encoding="utf-8")
+            cp = subprocess.run(
+                ["curl", "--config", str(config_path)],
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+            if cp.returncode != 0:
+                return None, f"curl-exit-{cp.returncode}:{(cp.stderr or '')[-500:]}", None, {}, model
 
-                cp = subprocess.run(
-                    ["curl", "--config", str(config_path)],
-                    text=True,
-                    capture_output=True,
-                    timeout=timeout,
-                )
+            try:
+                status = int((cp.stdout or "").strip()[-3:])
+            except Exception:
+                status = None
 
-                if cp.returncode != 0:
-                    return None, f"curl-exit-{cp.returncode}:{(cp.stderr or '')[-500:]}", None, {}, model
-
-                try:
-                    status = int((cp.stdout or "").strip()[-3:])
-                except Exception:
-                    status = None
-
-                header_map: dict[str, str] = {}
-                if headers_path.exists():
-                    for line in headers_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                        if ":" not in line:
-                            continue
-                        name, value = line.split(":", 1)
-                        name = name.strip()
-                        value = value.strip()
-                        if name.lower() == "retry-after":
-                            header_map["Retry-After"] = value
-                        else:
-                            header_map[name] = value
-
-                body = (
-                    response_path.read_text(encoding="utf-8", errors="replace")
-                    if response_path.exists()
-                    else ""
-                )
-
-                if status == 429 and attempt < max_retries:
-                    retry_after = _retry_after_seconds(header_map, body)
-                    if retry_after is not None and retry_after <= max_retry_wait:
-                        wait = max(1, math.ceil(retry_after) + 1)
-                        print(
-                            f"  LLM WAIT provider=groq reason=rate-limit "
-                            f"retry={attempt + 1}/{max_retries} waiting={wait}s",
-                            flush=True,
-                        )
-                        time.sleep(wait)
+            header_map: dict[str, str] = {}
+            if headers_path.exists():
+                for line in headers_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if ":" not in line:
                         continue
+                    name, value = line.split(":", 1)
+                    name = name.strip()
+                    value = value.strip()
+                    if name.lower() == "retry-after":
+                        header_map["Retry-After"] = value
+                    else:
+                        header_map[name] = value
 
-                if status is None or status < 200 or status >= 300:
-                    compact = " ".join(body.split())[-1000:]
-                    return None, f"http-{status}:{compact}", status, header_map, model
+            body = response_path.read_text(encoding="utf-8", errors="replace") if response_path.exists() else ""
 
-                try:
-                    data = json.loads(body)
-                    out = str(data["choices"][0]["message"]["content"]).strip()
-                except Exception as exc:
-                    return None, f"bad-response:{exc}", status, header_map, model
+            if status == 429:
+                retry_after = _retry_after_seconds(header_map, body)
+                if retry_after is not None:
+                    header_map["Retry-After"] = str(max(1, math.ceil(retry_after) + 1))
 
-                return out, (None if out else "empty"), status, header_map, model
+            if status is None or status < 200 or status >= 300:
+                compact = " ".join(body.split())[-1000:]
+                return None, f"http-{status}:{compact}", status, header_map, model
+
+            try:
+                data = json.loads(body)
+                out = str(data["choices"][0]["message"]["content"]).strip()
+            except Exception as exc:
+                return None, f"bad-response:{exc}", status, header_map, model
+
+            return out, (None if out else "empty"), status, header_map, model
 
     except subprocess.TimeoutExpired:
         return None, "timeout", None, {}, model
@@ -199,8 +163,7 @@ def _curl_groq(prompt: str, tier: str, timeout: int, json_mode: bool):
         return None, f"curl-error:{exc}", None, {}, model
 
 
-# Groq's Cloudflare edge can reject Python urllib's client signature (1010).
-# Manual curl requests succeed from the same machine, so use curl only for Groq.
+# Groq Cloudflare rejects urllib on this workload; use curl for Groq only.
 common._run_groq = _curl_groq
 
 
@@ -220,7 +183,6 @@ def filtered_chunks(text: str, size: int = base.CHUNK_CHARS):
 
 
 def smart_run_model(prompt, tier="fast", timeout=300, provider="auto"):
-    # History extraction always requires machine-parseable JSON.
     return common.run_model(
         prompt,
         tier=tier,
@@ -242,7 +204,6 @@ def save_state_with_progress(data):
         return
 
     _last_compiled_count = current_count
-
     total = _total_sessions or current_count
     remaining = max(0, total - current_count)
     percent = (current_count / total * 100.0) if total else 100.0
@@ -257,15 +218,12 @@ def save_state_with_progress(data):
     )
 
     try:
-        cooldown = float(os.environ.get("SECOND_BRAIN_SESSION_COOLDOWN", "10"))
+        cooldown = float(os.environ.get("SECOND_BRAIN_SESSION_COOLDOWN", "2"))
     except ValueError:
-        cooldown = 10.0
+        cooldown = 2.0
 
     if cooldown > 0:
-        print(
-            f"  COOLING session complete — waiting {cooldown:g}s",
-            flush=True,
-        )
+        print(f"  COOLING session complete — waiting {cooldown:g}s", flush=True)
         time.sleep(cooldown)
 
 
@@ -275,10 +233,7 @@ base.save_state = save_state_with_progress
 
 
 def provider_summary() -> None:
-    priority = os.environ.get(
-        "SECOND_BRAIN_LLM_PRIORITY",
-        "groq,gemini,openrouter,ollama",
-    )
+    priority = os.environ.get("SECOND_BRAIN_LLM_PRIORITY", "groq,gemini,openrouter,ollama")
 
     configured = []
     if os.environ.get("GROQ_API_KEY"):
@@ -289,14 +244,12 @@ def provider_summary() -> None:
         configured.append("openrouter")
     configured.append("ollama")
 
-    retries, max_wait = _groq_retry_policy()
-
     print("HYBRID LLM ROUTER", flush=True)
     print(f"  priority={priority}", flush=True)
     print(f"  available/configured={','.join(configured)}", flush=True)
     print(f"  cloud_chunk_chars={_cloud_chunk_size()}", flush=True)
     print("  groq_transport=curl", flush=True)
-    print(f"  groq_rate_retries={retries} max_wait={max_wait:g}s", flush=True)
+    print("  rate_limit_policy=rotate-provider-immediately", flush=True)
 
     cooldowns = []
     for provider in ("groq", "gemini", "openrouter", "ollama"):
@@ -306,14 +259,8 @@ def provider_summary() -> None:
             remaining = 0
         if remaining > 0:
             cooldowns.append(f"{provider}:{remaining}s")
-    print(
-        f"  provider_cooldowns={','.join(cooldowns) if cooldowns else 'none'}",
-        flush=True,
-    )
-    print(
-        "  cloud keys are read from environment only; key values are never logged",
-        flush=True,
-    )
+    print(f"  provider_cooldowns={','.join(cooldowns) if cooldowns else 'none'}", flush=True)
+    print("  cloud keys are read from environment only; key values are never logged", flush=True)
 
 
 if __name__ == "__main__":
