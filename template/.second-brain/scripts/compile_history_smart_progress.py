@@ -21,7 +21,7 @@ _completed_chunk_durations: list[float] = []
 _current_session_started_at: float | None = None
 _current_session_total_chunks = 0
 _current_session_completed_chunks = 0
-_weighted_rr_index = 0
+_primary_rr_index = 0
 
 
 def _env_timeout(name: str, default: int) -> int:
@@ -83,8 +83,6 @@ def _quiet_call(provider: str, prompt: str, tier: str):
     timeout = _provider_timeout(provider)
     capture = io.StringIO()
 
-    # macOS/Linux: enforce a wall-clock timeout around the entire provider call,
-    # not only the socket read timeout inside urllib/curl.
     old_handler = None
     can_alarm = hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer")
     try:
@@ -117,34 +115,32 @@ def _quiet_call(provider: str, prompt: str, tier: str):
 
 
 def _cloud_order() -> list[str]:
-    """Weighted cloud routing: Groq → Gemini → Groq → OpenRouter.
+    """Primary rotation is Groq ↔ Gemini; OpenRouter is reserve-only fallback.
 
-    The preferred slot follows the weighted cycle. If that provider is unavailable
-    or fails, the current chunk immediately tries the other configured clouds,
-    then Ollama. This keeps OpenRouter in active use without letting its variable
-    free-tier latency dominate every third chunk.
+    Each new chunk starts with the next primary provider. If it fails or is in
+    cooldown, the other primary is tried. OpenRouter is attempted only when both
+    primary providers fail for that chunk, preserving its limited free daily quota.
+    Ollama is appended later as the final local fallback.
     """
-    global _weighted_rr_index
+    global _primary_rr_index
 
     configured = smart._configured_clouds()
     if not configured:
         return []
 
     configured_set = set(configured)
-    weighted = [p for p in ("groq", "gemini", "groq", "openrouter") if p in configured_set]
-    if not weighted:
-        weighted = configured[:]
+    primaries = [p for p in ("groq", "gemini") if p in configured_set]
 
-    preferred = weighted[_weighted_rr_index % len(weighted)]
-    _weighted_rr_index += 1
+    if primaries:
+        preferred = primaries[_primary_rr_index % len(primaries)]
+        _primary_rr_index += 1
+        order = [preferred] + [p for p in primaries if p != preferred]
+    else:
+        order = []
 
-    # Fallback preference keeps the fast clouds ahead of OpenRouter while
-    # preserving every configured provider exactly once in the attempt order.
-    fallback_priority = ["groq", "gemini", "openrouter"]
-    order = [preferred]
-    for candidate in fallback_priority:
-        if candidate in configured_set and candidate not in order:
-            order.append(candidate)
+    if "openrouter" in configured_set:
+        order.append("openrouter")
+
     for candidate in configured:
         if candidate not in order:
             order.append(candidate)
@@ -301,17 +297,19 @@ base.save_state = save_state_with_human_progress
 
 def provider_summary() -> None:
     clouds = smart._configured_clouds()
-    cloud_text = "Groq → Gemini → Groq → OpenRouter" if all(
-        p in clouds for p in ("groq", "gemini", "openrouter")
-    ) else " → ".join(x.capitalize() for x in clouds) if clouds else "yok"
+    primaries = [p for p in ("groq", "gemini") if p in clouds]
+    primary_text = " ↔ ".join(x.capitalize() for x in primaries) if primaries else "yok"
+    reserve_text = "OpenRouter" if "openrouter" in clouds else "yok"
+
     print("SECOND BRAIN · HISTORY COMPILER", flush=True)
-    print(f"  Cloud planı: {cloud_text}", flush=True)
-    print("  Local fallback: Ollama", flush=True)
+    print(f"  Ana cloud: {primary_text}", flush=True)
+    print(f"  Cloud yedek: {reserve_text}", flush=True)
+    print("  Son fallback: Ollama", flush=True)
     print(
         "  Hard timeout: Groq 45s · Gemini 60s · OpenRouter 25s · Ollama 300s",
         flush=True,
     )
-    print("  Mod: weighted routing + otomatik fallback + JSON doğrulama + süre/ETA", flush=True)
+    print("  Mod: primary round-robin + reserve fallback + JSON doğrulama + süre/ETA", flush=True)
     print("", flush=True)
 
 
