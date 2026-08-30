@@ -18,6 +18,11 @@ fi
 export SECOND_BRAIN_LLM_PRIORITY="${SECOND_BRAIN_LLM_PRIORITY:-groq,gemini,openrouter,ollama}"
 export SECOND_BRAIN_PROVIDER_COOLDOWN="${SECOND_BRAIN_PROVIDER_COOLDOWN:-600}"
 
+# Groq free-tier TPM windows commonly ask for ~20-35s retries. Prefer waiting
+# for Groq over immediately heating the local Ollama fallback.
+export SECOND_BRAIN_GROQ_RATE_RETRIES="${SECOND_BRAIN_GROQ_RATE_RETRIES:-8}"
+export SECOND_BRAIN_GROQ_MAX_RETRY_WAIT="${SECOND_BRAIN_GROQ_MAX_RETRY_WAIT:-45}"
+
 # Conservative local fallback defaults. They are used only when Ollama is reached.
 export SECOND_BRAIN_OLLAMA_THREADS="${SECOND_BRAIN_OLLAMA_THREADS:-2}"
 export SECOND_BRAIN_OLLAMA_BATCH="${SECOND_BRAIN_OLLAMA_BATCH:-16}"
