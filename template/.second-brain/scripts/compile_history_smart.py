@@ -26,6 +26,7 @@ _initial_state = base.load_state()
 _initial_compiled = _initial_state.get("compiled", {}) if isinstance(_initial_state, dict) else {}
 _last_compiled_count = len(_initial_compiled) if isinstance(_initial_compiled, dict) else 0
 _total_sessions = len(base.discover_sessions())
+_cloud_rr_index = 0
 
 
 def _cloud_chunk_size(default: int = 12000) -> int:
@@ -182,14 +183,80 @@ def filtered_chunks(text: str, size: int = base.CHUNK_CHARS):
     return after
 
 
+def _configured_clouds() -> list[str]:
+    priority = [
+        x.strip().lower()
+        for x in os.environ.get(
+            "SECOND_BRAIN_LLM_PRIORITY",
+            "groq,gemini,openrouter,ollama",
+        ).split(",")
+        if x.strip()
+    ]
+    configured = {
+        "groq": bool(os.environ.get("GROQ_API_KEY")),
+        "gemini": bool(os.environ.get("GEMINI_API_KEY")),
+        "openrouter": bool(os.environ.get("OPENROUTER_API_KEY")),
+    }
+    return [p for p in priority if p in configured and configured[p]]
+
+
 def smart_run_model(prompt, tier="fast", timeout=300, provider="auto"):
-    return common.run_model(
+    """Round-robin cloud providers per chunk, then local Ollama as final fallback."""
+    global _cloud_rr_index
+
+    # Preserve explicit provider requests made by callers/tests.
+    if provider and provider != "auto":
+        return common.run_model(
+            prompt,
+            tier=tier,
+            timeout=timeout,
+            provider=provider,
+            json_mode=True,
+        )
+
+    clouds = _configured_clouds()
+    if not clouds:
+        return common.run_model(
+            prompt,
+            tier=tier,
+            timeout=timeout,
+            provider="ollama",
+            json_mode=True,
+        )
+
+    start = _cloud_rr_index % len(clouds)
+    _cloud_rr_index += 1
+    ordered = clouds[start:] + clouds[:start]
+
+    print(
+        f"  LLM ROUTE preferred={ordered[0]} order={'>'.join(ordered)}>ollama",
+        flush=True,
+    )
+
+    errors: list[str] = []
+    for candidate in ordered:
+        out, err = common.run_model(
+            prompt,
+            tier=tier,
+            timeout=timeout,
+            provider=candidate,
+            json_mode=True,
+        )
+        if not err and out:
+            return out, None
+        errors.append(f"{candidate}:{err or 'empty'}")
+
+    out, err = common.run_model(
         prompt,
         tier=tier,
         timeout=timeout,
-        provider=provider,
+        provider="ollama",
         json_mode=True,
     )
+    if not err and out:
+        return out, None
+    errors.append(f"ollama:{err or 'empty'}")
+    return None, ";".join(errors)
 
 
 def save_state_with_progress(data):
@@ -249,16 +316,17 @@ def provider_summary() -> None:
     print(f"  available/configured={','.join(configured)}", flush=True)
     print(f"  cloud_chunk_chars={_cloud_chunk_size()}", flush=True)
     print("  groq_transport=curl", flush=True)
-    print("  rate_limit_policy=rotate-provider-immediately", flush=True)
+    print("  routing_policy=round-robin-clouds-then-ollama", flush=True)
+    print(f"  cloud_round_robin={'>'.join(_configured_clouds()) or 'none'}", flush=True)
 
     cooldowns = []
-    for provider in ("groq", "gemini", "openrouter", "ollama"):
+    for provider_name in ("groq", "gemini", "openrouter", "ollama"):
         try:
-            remaining = common._cooldown_remaining(provider)
+            remaining = common._cooldown_remaining(provider_name)
         except Exception:
             remaining = 0
         if remaining > 0:
-            cooldowns.append(f"{provider}:{remaining}s")
+            cooldowns.append(f"{provider_name}:{remaining}s")
     print(f"  provider_cooldowns={','.join(cooldowns) if cooldowns else 'none'}", flush=True)
     print("  cloud keys are read from environment only; key values are never logged", flush=True)
 
