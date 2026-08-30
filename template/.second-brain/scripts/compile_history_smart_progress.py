@@ -22,7 +22,6 @@ _completed_chunk_durations: list[float] = []
 _current_session_started_at: float | None = None
 _current_session_total_chunks = 0
 _current_session_completed_chunks = 0
-_primary_rr_index = 0
 
 
 def _env_timeout(name: str, default: int) -> int:
@@ -128,30 +127,19 @@ def _quiet_call(provider: str, prompt: str, tier: str):
     return out, None
 
 
-def _cloud_order() -> list[str]:
-    """Primary rotation is Groq ↔ Gemini; OpenRouter is reserve-only cloud fallback."""
-    global _primary_rr_index
+def _provider_order() -> list[str]:
+    """Groq is the primary worker; free/plan-backed services are layered fallbacks."""
+    configured = set(smart._configured_clouds())
+    order: list[str] = []
 
-    configured = smart._configured_clouds()
-    if not configured:
-        return []
+    for provider in ("groq", "gemini", "openrouter"):
+        if provider in configured:
+            order.append(provider)
 
-    configured_set = set(configured)
-    primaries = [p for p in ("groq", "gemini") if p in configured_set]
+    if shutil.which("codex"):
+        order.append("codex")
 
-    if primaries:
-        preferred = primaries[_primary_rr_index % len(primaries)]
-        _primary_rr_index += 1
-        order = [preferred] + [p for p in primaries if p != preferred]
-    else:
-        order = []
-
-    if "openrouter" in configured_set:
-        order.append("openrouter")
-
-    for candidate in configured:
-        if candidate not in order:
-            order.append(candidate)
+    order.append("ollama")
     return order
 
 
@@ -192,16 +180,7 @@ def human_run_model(
         _current_session_total_chunks = total
         _current_session_completed_chunks = 0
 
-    if provider and provider != "auto":
-        order = [provider]
-    else:
-        # Cloud first. If all cloud options fail, use Codex CLI authenticated
-        # with the user's ChatGPT account. Ollama remains the last local fallback.
-        order = _cloud_order()
-        if shutil.which("codex") and "codex" not in order:
-            order.append("codex")
-        if "ollama" not in order:
-            order.append("ollama")
+    order = [provider] if provider and provider != "auto" else _provider_order()
 
     label = f"  Chunk {idx}/{total}" if idx and total else "  Chunk"
     failures: list[str] = []
@@ -308,22 +287,20 @@ base.save_state = save_state_with_human_progress
 
 
 def provider_summary() -> None:
-    clouds = smart._configured_clouds()
-    primaries = [p for p in ("groq", "gemini") if p in clouds]
-    primary_text = " ↔ ".join(_provider_label(x) for x in primaries) if primaries else "yok"
-    reserve_text = "OpenRouter" if "openrouter" in clouds else "yok"
+    clouds = set(smart._configured_clouds())
     codex_ready = shutil.which("codex") is not None
 
     print("SECOND BRAIN · HISTORY COMPILER", flush=True)
-    print(f"  Ana cloud: {primary_text}", flush=True)
-    print(f"  Cloud yedek: {reserve_text}", flush=True)
-    print(f"  ChatGPT yedek: {'Codex CLI hazır' if codex_ready else 'Codex CLI bulunamadı'}", flush=True)
+    print(f"  Ana: {'Groq' if 'groq' in clouds else 'yok'}", flush=True)
+    print(f"  Yedek 1: {'Gemini' if 'gemini' in clouds else 'yok'}", flush=True)
+    print(f"  Yedek 2: {'OpenRouter' if 'openrouter' in clouds else 'yok'}", flush=True)
+    print(f"  Yedek 3: {'ChatGPT/Codex CLI hazır' if codex_ready else 'ChatGPT/Codex CLI bulunamadı'}", flush=True)
     print("  Son fallback: Ollama", flush=True)
     print(
         "  Hard timeout: Groq 45s · Gemini 60s · OpenRouter 25s · ChatGPT/Codex 90s · Ollama 300s",
         flush=True,
     )
-    print("  Mod: primary round-robin + reserve fallbacks + JSON doğrulama + süre/ETA", flush=True)
+    print("  Mod: Groq-first + katmanlı fallback + JSON doğrulama + süre/ETA", flush=True)
     print("", flush=True)
 
 
