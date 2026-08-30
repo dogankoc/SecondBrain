@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import tempfile
 import time
+from pathlib import Path
 
 import common
 import compile_history as base
@@ -30,6 +34,124 @@ def _cloud_chunk_size(default: int = 14000) -> int:
     except ValueError:
         value = default
     return max(6000, min(value, base.CHUNK_CHARS))
+
+
+def _curl_groq(prompt: str, tier: str, timeout: int, json_mode: bool):
+    """Call Groq with curl so Cloudflare sees the same client family as manual tests.
+
+    The API key is written only to a mode-0600 temporary curl config and never
+    appears in process arguments or logs.
+    """
+    key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not key:
+        return None, "missing-key", None, {}, ""
+
+    model = (
+        os.environ.get("SECOND_BRAIN_GROQ_FAST", "qwen/qwen3.6-27b")
+        if tier == "fast"
+        else os.environ.get("SECOND_BRAIN_GROQ_SMART", "qwen/qwen3.8-27b")
+    )
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "stream": False,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="second-brain-groq-") as td:
+            td_path = Path(td)
+            request_path = td_path / "request.json"
+            response_path = td_path / "response.json"
+            headers_path = td_path / "headers.txt"
+            config_path = td_path / "curl.conf"
+
+            request_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            config_path.write_text(
+                "\n".join(
+                    [
+                        'silent',
+                        'show-error',
+                        'request = "POST"',
+                        'url = "https://api.groq.com/openai/v1/chat/completions"',
+                        f'header = "Authorization: Bearer {key}"',
+                        'header = "Content-Type: application/json"',
+                        'header = "Accept: application/json"',
+                        f'data-binary = "@{request_path}"',
+                        f'dump-header = "{headers_path}"',
+                        f'output = "{response_path}"',
+                        'write-out = "%{http_code}"',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(config_path, 0o600)
+
+            cp = subprocess.run(
+                ["curl", "--config", str(config_path)],
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+
+            if cp.returncode != 0:
+                return None, f"curl-exit-{cp.returncode}:{(cp.stderr or '')[-500:]}", None, {}, model
+
+            try:
+                status = int((cp.stdout or "").strip()[-3:])
+            except Exception:
+                status = None
+
+            header_map: dict[str, str] = {}
+            if headers_path.exists():
+                for line in headers_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if ":" not in line:
+                        continue
+                    name, value = line.split(":", 1)
+                    name = name.strip()
+                    value = value.strip()
+                    if name.lower() == "retry-after":
+                        header_map["Retry-After"] = value
+                    else:
+                        header_map[name] = value
+
+            body = (
+                response_path.read_text(encoding="utf-8", errors="replace")
+                if response_path.exists()
+                else ""
+            )
+
+            if status is None or status < 200 or status >= 300:
+                compact = " ".join(body.split())[-1000:]
+                return None, f"http-{status}:{compact}", status, header_map, model
+
+            try:
+                data = json.loads(body)
+                out = str(data["choices"][0]["message"]["content"]).strip()
+            except Exception as exc:
+                return None, f"bad-response:{exc}", status, header_map, model
+
+            return out, (None if out else "empty"), status, header_map, model
+
+    except subprocess.TimeoutExpired:
+        return None, "timeout", None, {}, model
+    except FileNotFoundError:
+        return None, "curl-missing", None, {}, model
+    except Exception as exc:
+        return None, f"curl-error:{exc}", None, {}, model
+
+
+# Groq's Cloudflare edge can reject Python urllib's client signature (1010).
+# Manual curl requests succeed from the same machine, so use curl only for Groq.
+common._run_groq = _curl_groq
 
 
 def filtered_chunks(text: str, size: int = base.CHUNK_CHARS):
@@ -121,6 +243,7 @@ def provider_summary() -> None:
     print(f"  priority={priority}", flush=True)
     print(f"  available/configured={','.join(configured)}", flush=True)
     print(f"  cloud_chunk_chars={_cloud_chunk_size()}", flush=True)
+    print("  groq_transport=curl", flush=True)
 
     cooldowns = []
     for provider in ("groq", "gemini", "openrouter", "ollama"):
