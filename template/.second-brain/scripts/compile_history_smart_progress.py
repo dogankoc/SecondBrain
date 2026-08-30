@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import signal
 import time
 
 import compile_history_smart as smart
@@ -20,6 +21,7 @@ _completed_chunk_durations: list[float] = []
 _current_session_started_at: float | None = None
 _current_session_total_chunks = 0
 _current_session_completed_chunks = 0
+_weighted_rr_index = 0
 
 
 def _env_timeout(name: str, default: int) -> int:
@@ -69,16 +71,44 @@ def _short_reason(err: str | None) -> str:
     return "request failed"
 
 
+class _HardTimeout(Exception):
+    pass
+
+
+def _alarm_handler(signum, frame):
+    raise _HardTimeout()
+
+
 def _quiet_call(provider: str, prompt: str, tier: str):
+    timeout = _provider_timeout(provider)
     capture = io.StringIO()
-    with contextlib.redirect_stdout(capture):
-        out, err = common.run_model(
-            prompt,
-            tier=tier,
-            timeout=_provider_timeout(provider),
-            provider=provider,
-            json_mode=True,
-        )
+
+    # macOS/Linux: enforce a wall-clock timeout around the entire provider call,
+    # not only the socket read timeout inside urllib/curl.
+    old_handler = None
+    can_alarm = hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer")
+    try:
+        if can_alarm:
+            old_handler = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, _alarm_handler)
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+
+        with contextlib.redirect_stdout(capture):
+            out, err = common.run_model(
+                prompt,
+                tier=tier,
+                timeout=timeout,
+                provider=provider,
+                json_mode=True,
+            )
+    except _HardTimeout:
+        return None, f"hard timeout {timeout}s"
+    finally:
+        if can_alarm:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if old_handler is not None:
+                signal.signal(signal.SIGALRM, old_handler)
+
     if err or not out:
         return None, _short_reason(err)
     if not _valid_json_object(out):
@@ -87,12 +117,38 @@ def _quiet_call(provider: str, prompt: str, tier: str):
 
 
 def _cloud_order() -> list[str]:
-    clouds = smart._configured_clouds()
-    if not clouds:
+    """Weighted cloud routing: Groq → Gemini → Groq → OpenRouter.
+
+    The preferred slot follows the weighted cycle. If that provider is unavailable
+    or fails, the current chunk immediately tries the other configured clouds,
+    then Ollama. This keeps OpenRouter in active use without letting its variable
+    free-tier latency dominate every third chunk.
+    """
+    global _weighted_rr_index
+
+    configured = smart._configured_clouds()
+    if not configured:
         return []
-    start = smart._cloud_rr_index % len(clouds)
-    smart._cloud_rr_index += 1
-    return clouds[start:] + clouds[:start]
+
+    configured_set = set(configured)
+    weighted = [p for p in ("groq", "gemini", "groq", "openrouter") if p in configured_set]
+    if not weighted:
+        weighted = configured[:]
+
+    preferred = weighted[_weighted_rr_index % len(weighted)]
+    _weighted_rr_index += 1
+
+    # Fallback preference keeps the fast clouds ahead of OpenRouter while
+    # preserving every configured provider exactly once in the attempt order.
+    fallback_priority = ["groq", "gemini", "openrouter"]
+    order = [preferred]
+    for candidate in fallback_priority:
+        if candidate in configured_set and candidate not in order:
+            order.append(candidate)
+    for candidate in configured:
+        if candidate not in order:
+            order.append(candidate)
+    return order
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -222,8 +278,6 @@ def save_state_with_human_progress(data):
     bar = "█" * filled + "░" * (width - filled)
 
     run_elapsed = time.monotonic() - _run_started_at
-    completed_this_run = max(1, current - before)
-    # Session ETA becomes useful after more than one save; avoid false precision early.
     run_session_count = max(1, current - len(smart._initial_compiled))
     avg_session = run_elapsed / run_session_count
     eta = avg_session * remaining
@@ -247,15 +301,17 @@ base.save_state = save_state_with_human_progress
 
 def provider_summary() -> None:
     clouds = smart._configured_clouds()
-    cloud_text = " → ".join(x.capitalize() for x in clouds) if clouds else "yok"
+    cloud_text = "Groq → Gemini → Groq → OpenRouter" if all(
+        p in clouds for p in ("groq", "gemini", "openrouter")
+    ) else " → ".join(x.capitalize() for x in clouds) if clouds else "yok"
     print("SECOND BRAIN · HISTORY COMPILER", flush=True)
-    print(f"  Cloud: {cloud_text}", flush=True)
+    print(f"  Cloud planı: {cloud_text}", flush=True)
     print("  Local fallback: Ollama", flush=True)
     print(
-        "  Timeout: Groq 45s · Gemini 60s · OpenRouter 25s · Ollama 300s",
+        "  Hard timeout: Groq 45s · Gemini 60s · OpenRouter 25s · Ollama 300s",
         flush=True,
     )
-    print("  Mod: round-robin + otomatik fallback + JSON doğrulama + süre/ETA", flush=True)
+    print("  Mod: weighted routing + otomatik fallback + JSON doğrulama + süre/ETA", flush=True)
     print("", flush=True)
 
 
