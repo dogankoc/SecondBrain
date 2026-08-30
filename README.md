@@ -20,8 +20,8 @@ You keep running each agent inside your normal project directories. The central 
 ## Install
 
 ```bash
-git clone <REPOSITORY_URL>
-cd second-brain
+git clone https://github.com/dogankoc/SecondBrain.git
+cd SecondBrain
 ./install.sh
 ```
 
