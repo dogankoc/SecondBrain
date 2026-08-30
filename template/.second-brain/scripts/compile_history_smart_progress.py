@@ -16,12 +16,14 @@ base = smart.base
 common = smart.common
 
 _CHUNK_RE = re.compile(r"(?m)^chunk=(\d+)/(\d+)\s*$")
+_SOURCE_RE = re.compile(r"(?m)^source=(.+?)\s*$")
 
 _run_started_at = time.monotonic()
 _completed_chunk_durations: list[float] = []
 _current_session_started_at: float | None = None
 _current_session_total_chunks = 0
 _current_session_completed_chunks = 0
+_USAGE_LOG = base.STATE_FILE.parent / "history-provider-usage.jsonl"
 
 
 def _env_timeout(name: str, default: int) -> int:
@@ -128,17 +130,13 @@ def _quiet_call(provider: str, prompt: str, tier: str):
 
 
 def _provider_order() -> list[str]:
-    """Groq is the primary worker; free/plan-backed services are layered fallbacks."""
     configured = set(smart._configured_clouds())
     order: list[str] = []
-
     for provider in ("groq", "gemini", "openrouter"):
         if provider in configured:
             order.append(provider)
-
     if shutil.which("codex"):
         order.append("codex")
-
     order.append("ollama")
     return order
 
@@ -161,6 +159,24 @@ def _mean_chunk_duration() -> float | None:
     return sum(sample) / len(sample)
 
 
+def _record_usage(source: str, idx: int, total: int, provider: str, elapsed: float, failures: list[str]) -> None:
+    try:
+        _USAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "ts": int(time.time()),
+            "source": source,
+            "chunk": idx,
+            "chunks": total,
+            "provider": provider,
+            "elapsed_s": round(elapsed, 3),
+            "fallbacks": failures,
+        }
+        with _USAGE_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def human_run_model(
     prompt: str,
     tier: str = "fast",
@@ -174,6 +190,8 @@ def human_run_model(
     match = _CHUNK_RE.search(prompt)
     idx = int(match.group(1)) if match else 0
     total = int(match.group(2)) if match else 0
+    source_match = _SOURCE_RE.search(prompt)
+    source = source_match.group(1).strip() if source_match else "unknown"
 
     if idx == 1 and total:
         _current_session_started_at = time.monotonic()
@@ -181,7 +199,6 @@ def human_run_model(
         _current_session_completed_chunks = 0
 
     order = [provider] if provider and provider != "auto" else _provider_order()
-
     label = f"  Chunk {idx}/{total}" if idx and total else "  Chunk"
     failures: list[str] = []
     chunk_started_at = time.monotonic()
@@ -192,6 +209,7 @@ def human_run_model(
             elapsed = time.monotonic() - chunk_started_at
             _completed_chunk_durations.append(elapsed)
             _current_session_completed_chunks += 1
+            _record_usage(source, idx, total, candidate, elapsed, failures)
 
             suffix = ""
             if failures:
@@ -210,14 +228,9 @@ def human_run_model(
 
             if total and idx == total and _current_session_started_at is not None:
                 session_elapsed = time.monotonic() - _current_session_started_at
-                session_avg = (
-                    session_elapsed / _current_session_completed_chunks
-                    if _current_session_completed_chunks
-                    else 0.0
-                )
+                session_avg = session_elapsed / _current_session_completed_chunks if _current_session_completed_chunks else 0.0
                 print(
-                    f"  Session ✓ {_fmt_duration(session_elapsed)} · "
-                    f"ort. chunk {_fmt_duration(session_avg)}",
+                    f"  Session ✓ {_fmt_duration(session_elapsed)} · ort. chunk {_fmt_duration(session_avg)}",
                     flush=True,
                 )
 
@@ -226,10 +239,7 @@ def human_run_model(
         failures.append(f"{_provider_label(candidate)}: {reason}")
 
     elapsed = time.monotonic() - chunk_started_at
-    print(
-        f"{label}  ✗ {_fmt_duration(elapsed)} · " + ", ".join(failures),
-        flush=True,
-    )
+    print(f"{label}  ✗ {_fmt_duration(elapsed)} · " + ", ".join(failures), flush=True)
     return None, "; ".join(failures)
 
 
@@ -243,7 +253,6 @@ def quiet_chunks(text: str, size: int = base.CHUNK_CHARS):
 
 base.chunks = quiet_chunks
 base.run_model = human_run_model
-
 _original_save_state = smart.save_state_with_progress
 
 
@@ -270,8 +279,7 @@ def save_state_with_human_progress(data):
     eta = avg_session * remaining
 
     print(
-        f"  GENEL [{bar}] %{percent:.1f} · {current}/{total} tamamlandı · "
-        f"Kalan {remaining} · ETA ~{_fmt_duration(eta)}",
+        f"  GENEL [{bar}] %{percent:.1f} · {current}/{total} tamamlandı · Kalan {remaining} · ETA ~{_fmt_duration(eta)}",
         flush=True,
     )
 
@@ -289,18 +297,14 @@ base.save_state = save_state_with_human_progress
 def provider_summary() -> None:
     clouds = set(smart._configured_clouds())
     codex_ready = shutil.which("codex") is not None
-
     print("SECOND BRAIN · HISTORY COMPILER", flush=True)
     print(f"  Ana: {'Groq' if 'groq' in clouds else 'yok'}", flush=True)
     print(f"  Yedek 1: {'Gemini' if 'gemini' in clouds else 'yok'}", flush=True)
     print(f"  Yedek 2: {'OpenRouter' if 'openrouter' in clouds else 'yok'}", flush=True)
     print(f"  Yedek 3: {'ChatGPT/Codex CLI hazır' if codex_ready else 'ChatGPT/Codex CLI bulunamadı'}", flush=True)
     print("  Son fallback: Ollama", flush=True)
-    print(
-        "  Hard timeout: Groq 45s · Gemini 60s · OpenRouter 25s · ChatGPT/Codex 90s · Ollama 300s",
-        flush=True,
-    )
-    print("  Mod: Groq-first + katmanlı fallback + JSON doğrulama + süre/ETA", flush=True)
+    print("  Hard timeout: Groq 45s · Gemini 60s · OpenRouter 25s · ChatGPT/Codex 90s · Ollama 300s", flush=True)
+    print("  Mod: Groq-first + katmanlı fallback + JSON doğrulama + süre/ETA + provider audit", flush=True)
     print("", flush=True)
 
 
