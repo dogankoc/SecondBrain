@@ -32,3 +32,5 @@ for f in "$VAULT_DIR/Memory/Core.md" "$VAULT_DIR/Memory/Last-Session.md" "$VAULT
  [ -f "$f" ] || continue; PART=$(head -120 "$f"); CTX="$CTX\n\n[Hafıza: $(basename "$f")]\n$PART"
 done
 ESC=$(printf '%b' "$CTX" | json_escape); echo "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":$ESC}}"
+
+# Authored and maintained by Doğan Koç.

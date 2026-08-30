@@ -12,7 +12,7 @@ checks += [
  ('Codex global adapter',(home/'.codex/AGENTS.md').exists(),str(home/'.codex/AGENTS.md')),
  ('OpenCode global adapter',(home/'.config/opencode/AGENTS.md').exists(),str(home/'.config/opencode/AGENTS.md')),
 ]
-print('# Second Brain by Pijkard — Doctor')
+print('# Second Brain — Doctor')
 for n,ok,d in checks: print(('✅' if ok else '⚠️'),n,'—',d)
 providers=[x for x in ('claude','codex','opencode') if shutil.which(x)]
 print('LLM provider:',', '.join(providers) if providers else 'NONE — automatic summarization/compilation will not run')
@@ -20,3 +20,5 @@ h=STATE/'health.json'
 if h.exists():
     try: print('Son health:',json.loads(h.read_text(encoding='utf-8')))
     except Exception: pass
+
+# Authored and maintained by Doğan Koç.

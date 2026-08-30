@@ -24,3 +24,5 @@ for p in state.glob('active-*.json'):
 PY
 H=$(date +%H); H=$((10#$H)); if [ "$H" -ge 18 ]; then (python3 "$VAULT_DIR/.second-brain/scripts/compile.py" >/dev/null 2>&1 &) || true; fi
 rm -f "$IN" "$STATE_DIR/session_start_time" "$STATE_DIR/prompt_count"
+
+# Authored and maintained by Doğan Koç.

@@ -8,3 +8,5 @@ mkdir -p "$DST"; cp -R "$SRC"/. "$DST"/
 "$ROOT/install.sh" --path "$DST" --upgrade
 echo "MIGRATED: $SRC -> $DST"
 echo "Source vault was not deleted."
+
+# Authored and maintained by Doğan Koç.

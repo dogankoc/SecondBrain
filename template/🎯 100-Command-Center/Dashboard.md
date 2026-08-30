@@ -1,4 +1,4 @@
-# Second Brain by Pijkard
+# Second Brain
 
 ## Memory
 - [[Memory/Core]]
@@ -12,3 +12,7 @@
 
 ## History
 - [[history/index|Imported Conversation History]]
+
+---
+
+_Authored and maintained by [Doğan Koç](https://github.com/dogankoc)._

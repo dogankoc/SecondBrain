@@ -13,3 +13,5 @@ jobs:
         run: |
           ./install.sh --name "CI User" --path "$RUNNER_TEMP/Second Brain" --language en
           test -f "$RUNNER_TEMP/Second Brain/.second-brain/config.json"
+
+# Authored and maintained by Doğan Koç.

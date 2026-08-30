@@ -35,7 +35,7 @@ def _provider_order(requested='auto'):
 def _run(cmd,prompt,timeout):
     env=os.environ.copy(); env['SECOND_BRAIN_INVOKED']='1'
     try:
-        with tempfile.TemporaryDirectory(prefix='second-brain-pijkard-') as td:
+        with tempfile.TemporaryDirectory(prefix='second-brain-') as td:
             cp=subprocess.run(cmd,input=prompt,text=True,capture_output=True,cwd=td,env=env,timeout=timeout)
         if cp.returncode: return None,f'exit-{cp.returncode}:{(cp.stderr or "")[-500:]}'
         return (cp.stdout or '').strip(),None
@@ -71,3 +71,5 @@ def run_model(prompt,tier='fast',timeout=300,provider='auto'):
         errors.append(f'{p}:{err or "empty"}')
     return None,';'.join(errors) or 'no-provider'
 run_claude=run_model
+
+# Authored and maintained by Doğan Koç.

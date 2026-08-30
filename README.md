@@ -1,4 +1,4 @@
-# Second Brain by Pijkard
+# Second Brain
 
 A local, file-based AI memory layer for **Claude Code, Codex, and OpenCode** that works across all of your projects.
 
@@ -21,7 +21,7 @@ You keep running each agent inside your normal project directories. The central 
 
 ```bash
 git clone <REPOSITORY_URL>
-cd second-brain-by-pijkard
+cd second-brain
 ./install.sh
 ```
 
@@ -88,3 +88,7 @@ Open `~/Documents/Second Brain` as a vault. Obsidian is optional; the memory eng
 ## License
 
 MIT
+
+---
+
+_Authored and maintained by [Doğan Koç](https://github.com/dogankoc)._

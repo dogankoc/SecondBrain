@@ -68,3 +68,5 @@ def main():
     save_pos(sp,len(full))
     print(p); return 0
 if __name__=='__main__': raise SystemExit(main())
+
+# Authored and maintained by Doğan Koç.

@@ -26,3 +26,5 @@ PY
 rm -f "$IN"
 C=0; [ -f "$STATE_DIR/prompt_count" ] && C=$(cat "$STATE_DIR/prompt_count" 2>/dev/null || echo 0); C=$((C+1)); echo "$C" > "$STATE_DIR/prompt_count"
 if [ $((C%15)) -eq 0 ]; then M="[Hafıza] $C. mesaj. Kalıcı karar, tercih ve açık işleri dosyala."; E=$(printf '%s' "$M"|json_escape); echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":$E}}"; fi
+
+# Authored and maintained by Doğan Koç.

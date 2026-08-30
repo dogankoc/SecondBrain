@@ -13,7 +13,7 @@ def render(i,src):
     claims='\n'.join('- '+str(x) for x in i.get('claims',[])); rel='\n'.join('- [['+str(x)+']]' for x in i.get('related',[])); con='\n'.join('- '+str(x) for x in i.get('contradictions',[]))
     return f'''---\ntitle: "{title.replace(chr(34),chr(39))}"\ntype: {typ}\nstatus: {status}\nconfidence: {conf}\ncreated: {now():%Y-%m-%d}\nupdated: {now():%Y-%m-%d}\n---\n# {title}\n\n## Summary\n\n{i.get('summary','')}\n\n## Claims\n\n{claims}\n\n## Related\n\n{rel}\n\n## Sources\n\n- [[{src}]]\n\n## Contradictions\n\n{con}\n'''
 def index():
-    out=['# Second Brain by Pijkard — Index','']
+    out=['# Second Brain — Index','']
     for label,d in [('Projects','🏰 300-Projects'),('Entities','entities'),('Concepts','concepts'),('Decisions','decisions'),('Syntheses','syntheses'),('Sources','sources')]:
         out+=['## '+label,'']; p=VAULT/d
         if p.exists(): out += [f'- [[{f.relative_to(VAULT).with_suffix("").as_posix()}]]' for f in sorted(p.rglob('*.md'))]
@@ -41,3 +41,5 @@ def main():
     if changed:append_log('compile | '+'; '.join(changed[:30]))
     print('\n'.join(changed) if changed else 'COMPILE_OK: değişiklik yok');return 0
 if __name__=='__main__':raise SystemExit(main())
+
+# Authored and maintained by Doğan Koç.

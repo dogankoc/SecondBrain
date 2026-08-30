@@ -1,4 +1,4 @@
-# Second Brain by Pijkard
+# Second Brain
 
 Claude Code, Codex ve OpenCode için tüm projeler arasında ortak çalışan lokal AI hafıza katmanı.
 
@@ -8,7 +8,7 @@ Kurulumdan sonra agent'ları Second Brain klasöründe çalıştırmazsın; her 
 
 ```bash
 ./install.sh \
-  --name "Pijkard" \
+  --name "Alex" \
   --path "$HOME/Documents/Second Brain" \
   --language tr \
   --checkpoint-minutes 10
@@ -33,3 +33,7 @@ Orijinal Claude/Codex JSONL transcript'leri `raw/history/` altında aynen korunu
 ## Obsidian
 
 `~/Documents/Second Brain` klasörünü vault olarak açman yeterli.
+
+---
+
+_Authored and maintained by [Doğan Koç](https://github.com/dogankoc)._

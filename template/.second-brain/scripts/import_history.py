@@ -294,7 +294,7 @@ def rebuild_index(rows: list[dict[str, str]]) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Import historical Claude Code and Codex transcripts into Second Brain by Pijkard.")
+    ap = argparse.ArgumentParser(description="Import historical Claude Code and Codex transcripts into Second Brain.")
     ap.add_argument("--providers", default="claude,codex", help="comma-separated: claude,codex")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -351,3 +351,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+# Authored and maintained by Doğan Koç.

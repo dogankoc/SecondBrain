@@ -35,3 +35,5 @@ def main():
         lines+=['## '+name,'']; lines += ['- none'] if not items else [f'- `{(x[0] if isinstance(x,tuple) else x).relative_to(VAULT)}`'+(f' — {x[1]}' if isinstance(x,tuple) else '') for x in items[:200]];lines.append('')
     out=VAULT/'knowledge/lint-report.md';atomic_write(out,'\n'.join(lines)+'\n');print('\n'.join(lines[:10]));return 1 if broken or schema else 0
 if __name__=='__main__':raise SystemExit(main())
+
+# Authored and maintained by Doğan Koç.

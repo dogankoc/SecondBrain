@@ -280,7 +280,7 @@ def append_managed(path: Path, start: str, end: str, item: dict[str, Any], meta:
 
 
 def rebuild_index() -> None:
-    lines = ["# Second Brain by Pijkard — Index", ""]
+    lines = ["# Second Brain — Index", ""]
     sections = [
         ("Projects", "🏰 300-Projects"),
         ("Entities", "entities"),
@@ -425,3 +425,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+# Authored and maintained by Doğan Koç.

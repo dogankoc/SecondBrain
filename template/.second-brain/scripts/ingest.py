@@ -27,3 +27,5 @@ def main():
             atomic_write(stub, f'''---\ntitle: "{name.replace(chr(34),chr(39))}"\ntype: {typ}\nstatus: draft\nconfidence: unknown\ncreated: {now():%Y-%m-%d}\nupdated: {now():%Y-%m-%d}\n---\n# {name}\n\n## Summary\n\nKaynak ingest sırasında keşfedildi; ayrıntılar henüz derlenmedi.\n\n## Sources\n\n- [[{t.relative_to(VAULT).with_suffix('').as_posix()}]]\n''')
     append_log(f'ingest | {rel} -> {t.relative_to(VAULT)}');print(t);return 0
 if __name__=='__main__':raise SystemExit(main())
+
+# Authored and maintained by Doğan Koç.
